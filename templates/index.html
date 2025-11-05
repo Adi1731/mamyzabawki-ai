@@ -77,25 +77,32 @@
     const taskId = data.task_id;
 
     let timer = setInterval(async () => {
-      const s = await fetch(`/status/${taskId}`);
-      const info = await s.json();
+    const s = await fetch(`/status/${taskId}`);
+    const info = await s.json();
 
-      if (info.progress !== undefined) {
+    if (info.progress !== undefined) {
         document.getElementById("bar").value = info.progress;
         document.getElementById("percent").textContent = info.progress + "%";
-      }
-      if (info.elapsed !== undefined) {
-        document.getElementById("elapsed").textContent = info.elapsed + "s";
-      }
+    }
 
-      if (info.status === "done") {
+    if (info.elapsed !== undefined) {
+        let elapsed = info.elapsed;
+        let eta = info.eta || 0;
+        let cur = info.current || 0;
+        let total = info.total || 0;
+
+        document.getElementById("elapsed").textContent =
+        `minęło ${elapsed}s / pozostało ~${eta}s — ${cur}/${total} ID`;
+    }
+
+    if (info.status === "done") {
         clearInterval(timer);
         document.getElementById("result").innerHTML =
-          `<a href='${info.file}' target='_blank'>📄 Pobierz plik</a>`;
-      } else if (info.status === "error") {
+        `<a href='${info.file}' target='_blank'>📄 Pobierz plik</a>`;
+    } else if (info.status === "error") {
         clearInterval(timer);
         document.getElementById("result").innerHTML = "❌ " + info.error;
-      }
+    }
     }, 1500);
   });
   </script>

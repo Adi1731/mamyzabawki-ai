@@ -208,10 +208,43 @@ def process_task(task_id, shop, user, password, model, file_path):
         with open(file_path, "r", encoding="utf-8") as f:
             product_ids = [line.strip() for line in f if line.strip()]
 
+        # 🔐 Logowanie do Shopera
+        base_url = f"https://{shop}.shoparena.pl/webapi/rest"
+        auth_url = f"{base_url}/auth"
+        token_resp = requests.post(auth_url, auth=(user, password))
+        if token_resp.status_code != 200:
+            raise RuntimeError("Błąd logowania do Shopera")
+
+        token = token_resp.json().get("access_token")
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        # 🔹 Pobranie wszystkich producentów (mapa ID → nazwa)
+        producer_map = {}
+        page = 1
+        while True:
+            resp = requests.get(f"{base_url}/producers?limit=50&page={page}", headers=headers)
+            if resp.status_code != 200:
+                print(f"⚠️ Błąd pobierania producentów (strona {page})")
+                break
+
+            data = resp.json()
+            for p in data.get("list", []):
+                translations = p.get("translations", {}).get("pl_PL", {})
+                name = translations.get("name") or p.get("name") or f"ID {p.get('producer_id')}"
+                producer_map[p["producer_id"]] = name.strip()
+
+            if page >= data.get("pages", 1):
+                break
+            page += 1
+
+        print(f"✅ Załadowano {len(producer_map)} producentów")
+
+        # 🔹 Pobranie danych produktów
         products = _fetch_shoper_products(shop, user, password, product_ids)
         if not products:
             raise RuntimeError("Nie udało się pobrać danych produktów z Shopera")
 
+        # 📘 Przygotowanie Excela
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Descriptions"
@@ -224,19 +257,13 @@ def process_task(task_id, shop, user, password, model, file_path):
                 name = _norm(translations.get("name") or p.get("name"))
                 description = _norm(translations.get("description") or p.get("description"))
                 attributes = p.get("attributes") or []
-                producer = p.get("producer", {})
-                producer_translations = producer.get("translations", {}).get("pl_PL", {})
-                producer_name = _norm(
-                    producer_translations.get("name") or
-                    producer.get("name") or
-                    p.get("producer_id", "")
-                )
+                producer_id = p.get("producer_id")
+                producer_name = producer_map.get(producer_id, f"ID {producer_id or 'brak'}")
 
-
+                # 🧠 Generowanie promptu i opisów
                 prompt = _build_prompt(name, description, attributes, producer_name)
                 html_code = _call_openai(prompt)
                 html_code = _compact_html(html_code)
-
 
                 ws.append([p.get("product_id", ""), name, html_code])
                 print(f"[{i}/{total}] ✅ {name}")
@@ -245,7 +272,7 @@ def process_task(task_id, shop, user, password, model, file_path):
                 ws.append([p.get("product_id", ""), name or "Brak nazwy", f"Błąd: {e}"])
                 print(f"[{i}/{total}] ⚠️ Błąd dla {name}: {e}")
 
-            # Aktualizacja postępu i czasu
+            # 📊 Aktualizacja postępu i czasu
             elapsed = (datetime.now() - start_time).seconds
             progress = int(i / total * 100)
             eta = int(elapsed / (progress / 100) - elapsed) if progress > 0 else 0
@@ -260,11 +287,12 @@ def process_task(task_id, shop, user, password, model, file_path):
 
             time.sleep(1.0)
 
-
+        # 💾 Zapis pliku
         os.makedirs("static", exist_ok=True)
         output_path = os.path.join("static", f"generated_{task_id}.xlsx")
         wb.save(output_path)
 
+        # ✅ Zakończenie
         tasks[task_id]["status"] = "done"
         tasks[task_id]["file"] = f"/{output_path}"
         tasks[task_id]["elapsed"] = (datetime.now() - start_time).seconds
@@ -272,7 +300,6 @@ def process_task(task_id, shop, user, password, model, file_path):
     except Exception as e:
         tasks[task_id]["status"] = "error"
         tasks[task_id]["error"] = str(e)
-
 
 # ------------------------------------------------------------
 # Endpoints asynchroniczne

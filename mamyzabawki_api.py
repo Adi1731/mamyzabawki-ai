@@ -128,7 +128,11 @@ Atrybuty: {attrs_str}
 Zdjęcie: {image_url}
 """
         html_result = _call_openai(prompt)
-        return jsonify({"response": html_result})
+        if request.args.get("format") == "html":
+            return html_result, 200, {"Content-Type": "text/html; charset=utf-8"}
+        else:
+            return jsonify({"response": html_result})
+
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

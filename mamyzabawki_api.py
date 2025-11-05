@@ -179,12 +179,12 @@ def run_process():
         user = request.form["user"].strip()
         password = request.form["pass"].strip()
         model = request.form.get("model", "gpt-4o-mini").strip() or "gpt-4o-mini"
-        file = request.files["ids_file"]
+        file = request.files.get("ids_file")
 
         if not file:
             return render_template("index.html", msg="❌ Brak pliku z ID produktów", success=False)
 
-        # ⚙️ poprawa zapisu do tymczasowego pliku
+        # ⚙️ zapisz plik tymczasowo i wczytaj ID produktów
         temp_dir = tempfile.mkdtemp()
         temp_path = os.path.join(temp_dir, "ids.txt")
         file.save(temp_path)
@@ -192,47 +192,62 @@ def run_process():
         with open(temp_path, "r", encoding="utf-8") as f:
             product_ids = [line.strip() for line in f if line.strip()]
 
-        products = _fetch_shoper_products(shop, user, password, product_ids)
+        if not product_ids:
+            return render_template("index.html", msg="❌ Plik nie zawiera żadnych ID produktów", success=False)
 
+        # 🔑 Pobranie danych produktów z Shoper API
+        products = _fetch_shoper_products(shop, user, password, product_ids)
+        if not products:
+            return render_template("index.html", msg="❌ Nie udało się pobrać danych produktów z Shopera", success=False)
+
+        # 📘 Przygotowanie Excela
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Descriptions"
-        ws.append(["ID", "Name", "HTML Description"])
+        ws.append(["ID", "Nazwa produktu", "Opis HTML"])
 
-        for p in products:
-            translations = (p.get("translations") or {}).get("pl_PL") or {}
-            name = _norm(translations.get("name") or p.get("name"))
-            description = _norm(translations.get("description") or p.get("description"))
-            attributes = p.get("attributes") or []
-            producer_name = _norm(p.get("producer_id", ""))
-
-            body = {
-                "name": name,
-                "description": description,
-                "producer_name": producer_name,
-                "attributes": attributes,
-            }
-
-            # ✅ bezpośrednie wywołanie funkcji zamiast HTTP requestu do samego siebie
-            html_code = ""
+        # 🔄 Przetwarzanie każdego produktu
+        for idx, p in enumerate(products, start=1):
             try:
+                translations = (p.get("translations") or {}).get("pl_PL") or {}
+                name = _norm(translations.get("name") or p.get("name"))
+                description = _norm(translations.get("description") or p.get("description"))
+                attributes = p.get("attributes") or []
+                producer_name = _norm(p.get("producer_id", ""))
+
+                # 🧠 Przygotowanie danych dla modelu
+                body = {
+                    "name": name,
+                    "description": description,
+                    "producer_name": producer_name,
+                    "attributes": attributes,
+                }
+
+                # ✅ Bezpośrednie wywołanie OpenAI (bez zapętlenia HTTP)
                 html_code = _call_openai(json.dumps(body, ensure_ascii=False))
+
+                ws.append([p.get("product_id", ""), name, html_code])
+                print(f"[{idx}/{len(products)}] ✅ Wygenerowano opis dla: {name}")
+                # mały odstęp między zapytaniami, żeby uniknąć rate-limit
+                time.sleep(1.5)
+
             except Exception as e:
-                html_code = f"Błąd generowania: {e}"
+                ws.append([p.get("product_id", ""), name or "Brak nazwy", f"Błąd: {e}"])
+                print(f"[{idx}/{len(products)}] ⚠️ Błąd dla {name}: {e}")
 
-            ws.append([p.get("product_id", ""), name, html_code])
-            time.sleep(1)  # mały delay między zapytaniami
-
+        # 💾 Zapisz wynikowy plik w static/
         os.makedirs("static", exist_ok=True)
         output_path = os.path.join("static", "generated.xlsx")
         wb.save(output_path)
 
         return render_template(
             "index.html",
-            msg=f"✅ Przetwarzanie zakończone. <a href='/static/generated.xlsx' target='_blank'>Pobierz plik</a>",
+            msg=f"✅ Przetwarzanie zakończone. <a href='/static/generated.xlsx' target='_blank'>📄 Pobierz plik</a>",
             success=True,
         )
+
     except Exception as e:
+        print(f"❌ Błąd krytyczny: {e}")
         return render_template("index.html", msg=f"❌ Błąd: {e}", success=False)
 
 

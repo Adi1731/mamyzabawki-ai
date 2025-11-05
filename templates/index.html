@@ -13,24 +13,18 @@
     input[type=file]{margin:8px 0}
     button{padding:10px 16px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer}
     .note{font-size:12px;color:#555}
-    .ok{padding:10px;background:#e8f7ec;border:1px solid #b7e1c1;border-radius:8px;margin:16px 0}
-    .err{padding:10px;background:#fde8e8;border:1px solid #f5b4b4;border-radius:8px;margin:16px 0}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    progress{width:100%;height:20px}
   </style>
 </head>
 <body>
   <h1>mamyzabawki — Generator opisów HTML</h1>
 
-  {% if msg %}
-    <div class="{{ 'ok' if success else 'err' }}">{{ msg|safe }}</div>
-  {% endif %}
-
-  <form action="/run" method="post" enctype="multipart/form-data">
+  <form id="generatorForm">
     <fieldset>
       <legend>Dane Shopera</legend>
       <label>Adres sklepu (bez https i bez .shoparena.pl)</label>
       <input type="text" name="shop" placeholder="np. mamyzabawki" required>
-      <div class="row">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div>
           <label>Login (Shoper API)</label>
           <input type="text" name="user" required>
@@ -44,9 +38,8 @@
 
     <fieldset>
       <legend>Produkty do przetworzenia</legend>
-      <label>Plik .txt z ID produktów (jeden ID w linii)</label>
+      <label>Plik .txt z ID produktów</label>
       <input type="file" name="ids_file" accept=".txt" required>
-      <div class="note">Przykład: <code>12345</code><br><code>67890</code></div>
     </fieldset>
 
     <fieldset>
@@ -58,8 +51,53 @@
     <button type="submit">Generuj opisy i zapisz Excel</button>
   </form>
 
-  <p class="note">
-    Po przetworzeniu zobaczysz link do pliku .xlsx (zapisywany w <code>/static/</code>).
-  </p>
+  <div id="progress" style="display:none;margin-top:20px;">
+    <progress id="bar" value="0" max="100"></progress>
+    <p><span id="percent">0%</span> — czas: <span id="elapsed">0s</span></p>
+  </div>
+
+  <div id="result" style="margin-top:20px;font-weight:500;"></div>
+
+  <script>
+  document.getElementById("generatorForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    document.getElementById("progress").style.display = "block";
+    document.getElementById("result").innerHTML = "";
+    document.getElementById("bar").value = 0;
+    document.getElementById("percent").textContent = "0%";
+    document.getElementById("elapsed").textContent = "0s";
+
+    const res = await fetch("/run_async", { method: "POST", body: formData });
+    const data = await res.json();
+    if (!data.task_id) {
+      document.getElementById("result").textContent = "❌ Błąd uruchamiania zadania: " + (data.error || "");
+      return;
+    }
+    const taskId = data.task_id;
+
+    let timer = setInterval(async () => {
+      const s = await fetch(`/status/${taskId}`);
+      const info = await s.json();
+
+      if (info.progress !== undefined) {
+        document.getElementById("bar").value = info.progress;
+        document.getElementById("percent").textContent = info.progress + "%";
+      }
+      if (info.elapsed !== undefined) {
+        document.getElementById("elapsed").textContent = info.elapsed + "s";
+      }
+
+      if (info.status === "done") {
+        clearInterval(timer);
+        document.getElementById("result").innerHTML =
+          `<a href='${info.file}' target='_blank'>📄 Pobierz plik</a>`;
+      } else if (info.status === "error") {
+        clearInterval(timer);
+        document.getElementById("result").innerHTML = "❌ " + info.error;
+      }
+    }, 1500);
+  });
+  </script>
 </body>
 </html>

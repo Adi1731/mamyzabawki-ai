@@ -4,14 +4,23 @@
 import os
 import json
 import html
+import tempfile
+import time
 import requests
-from flask import Flask, request, jsonify
+import openpyxl
+from flask import Flask, request, jsonify, render_template
 
-app = Flask(__name__)
+# ------------------------------------------------------------
+# Konfiguracja
+# ------------------------------------------------------------
+app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# Ustawienia modelu i klucza
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+
 
 # ------------------------------------------------------------
 # Pomocnicze funkcje
@@ -19,8 +28,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 def _norm(s):
     return "" if s is None else str(s).strip()
 
-def _escape(s):
-    return html.escape(_norm(s))
 
 def _call_openai(prompt: str) -> str:
     """Połączenie z OpenAI Chat Completions API"""
@@ -30,7 +37,7 @@ def _call_openai(prompt: str) -> str:
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     body = {
         "model": OPENAI_MODEL,
@@ -58,8 +65,29 @@ def _call_openai(prompt: str) -> str:
     )
     if content.startswith("```"):
         content = content.strip("`").replace("html", "").strip()
-
     return content
+
+
+def _fetch_shoper_products(shop, user, password, ids):
+    """Pobiera dane produktów z Shopera"""
+    base_url = f"https://{shop}.shoparena.pl/webapi/rest"
+    auth_url = f"{base_url}/auth"
+
+    token_resp = requests.post(auth_url, auth=(user, password))
+    if token_resp.status_code != 200:
+        raise RuntimeError("Błąd logowania do Shopera")
+
+    token = token_resp.json().get("access_token")
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    products = []
+    for pid in ids:
+        resp = requests.get(f"{base_url}/products/{pid}", headers=headers)
+        if resp.status_code == 200:
+            products.append(resp.json())
+        else:
+            print(f"Błąd pobierania produktu {pid}: {resp.status_code}")
+    return products
 
 
 # ------------------------------------------------------------
@@ -113,10 +141,10 @@ Stwórz kompletny opis HTML produktu w następującym układzie (bez ```):
 </div>
 
 Zasady:
-- Generuj **czysty HTML**, bez żadnych ``` ani znaczników języka.
-- Sekcja <p> z opisem powinna mieć **ok. 1000–1500 znaków**.
+- Generuj czysty HTML, bez ``` ani znaczników języka.
+- Sekcja <p> z opisem powinna mieć ok. 1000–1500 znaków.
 - Lista cech: 4–6 naturalnych, konkretnych punktów.
-- Jeśli atrybuty są puste, **wyodrębnij parametry techniczne z opisu** (np. wymiary, materiał, kolor, wiek, przeznaczenie).
+- Jeśli atrybuty są puste, wyodrębnij parametry techniczne z opisu.
 - Nie dodawaj stylów inline, komentarzy ani innych elementów.
 - Język polski, profesjonalny, przyjazny, techniczny, bez przesady marketingowej.
 
@@ -132,10 +160,80 @@ Zdjęcie: {image_url}
             return html_result, 200, {"Content-Type": "text/html; charset=utf-8"}
         else:
             return jsonify({"response": html_result})
-
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ------------------------------------------------------------
+# Formularz webowy i przetwarzanie wsadowe
+# ------------------------------------------------------------
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+
+@app.route("/run", methods=["POST"])
+def run_process():
+    try:
+        shop = request.form["shop"].strip()
+        user = request.form["user"].strip()
+        password = request.form["pass"].strip()
+        model = request.form.get("model", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        file = request.files["ids_file"]
+
+        if not file:
+            return render_template("index.html", msg="❌ Brak pliku z ID produktów", success=False)
+
+        # ⚙️ poprawa zapisu do tymczasowego pliku
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, "ids.txt")
+        file.save(temp_path)
+
+        with open(temp_path, "r", encoding="utf-8") as f:
+            product_ids = [line.strip() for line in f if line.strip()]
+
+        products = _fetch_shoper_products(shop, user, password, product_ids)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Descriptions"
+        ws.append(["ID", "Name", "HTML Description"])
+
+        for p in products:
+            translations = (p.get("translations") or {}).get("pl_PL") or {}
+            name = _norm(translations.get("name") or p.get("name"))
+            description = _norm(translations.get("description") or p.get("description"))
+            attributes = p.get("attributes") or []
+            producer_name = _norm(p.get("producer_id", ""))
+
+            body = {
+                "name": name,
+                "description": description,
+                "producer_name": producer_name,
+                "attributes": attributes,
+            }
+
+            # ✅ bezpośrednie wywołanie funkcji zamiast HTTP requestu do samego siebie
+            html_code = ""
+            try:
+                html_code = _call_openai(json.dumps(body, ensure_ascii=False))
+            except Exception as e:
+                html_code = f"Błąd generowania: {e}"
+
+            ws.append([p.get("product_id", ""), name, html_code])
+            time.sleep(1)  # mały delay między zapytaniami
+
+        os.makedirs("static", exist_ok=True)
+        output_path = os.path.join("static", "generated.xlsx")
+        wb.save(output_path)
+
+        return render_template(
+            "index.html",
+            msg=f"✅ Przetwarzanie zakończone. <a href='/static/generated.xlsx' target='_blank'>Pobierz plik</a>",
+            success=True,
+        )
+    except Exception as e:
+        return render_template("index.html", msg=f"❌ Błąd: {e}", success=False)
 
 
 # ------------------------------------------------------------

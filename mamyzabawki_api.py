@@ -8,6 +8,7 @@ import time
 import uuid
 import requests
 import openpyxl
+import re
 from threading import Thread
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template
@@ -81,6 +82,15 @@ def _call_openai(prompt: str) -> str:
             time.sleep(RETRY_DELAY)
 
     raise RuntimeError("Nie udało się uzyskać odpowiedzi z OpenAI po 3 próbach")
+
+
+def _compact_html(text: str) -> str:
+    """Usuwa nadmiarowe białe znaki, entery i taby z HTML-a"""
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)  # zamienia wiele spacji i enterów na jedną spację
+    text = re.sub(r">\s+<", "><", text)  # usuwa odstępy między znacznikami
+    return text.strip()
 
 
 def _fetch_shoper_products(shop, user, password, ids):
@@ -176,6 +186,8 @@ def get_response():
 
         prompt = _build_prompt(name, description, attributes, producer_name, image_url)
         html_result = _call_openai(prompt)
+        html_result = _compact_html(html_result)
+
 
         if request.args.get("format") == "html":
             return html_result, 200, {"Content-Type": "text/html; charset=utf-8"}
@@ -216,6 +228,8 @@ def process_task(task_id, shop, user, password, model, file_path):
 
                 prompt = _build_prompt(name, description, attributes, producer_name)
                 html_code = _call_openai(prompt)
+                html_code = _compact_html(html_code)
+
 
                 ws.append([p.get("product_id", ""), name, html_code])
                 print(f"[{i}/{total}] ✅ {name}")
@@ -224,9 +238,21 @@ def process_task(task_id, shop, user, password, model, file_path):
                 ws.append([p.get("product_id", ""), name or "Brak nazwy", f"Błąd: {e}"])
                 print(f"[{i}/{total}] ⚠️ Błąd dla {name}: {e}")
 
-            tasks[task_id]["progress"] = int(i / total * 100)
-            tasks[task_id]["elapsed"] = (datetime.now() - start_time).seconds
+            # Aktualizacja postępu i czasu
+            elapsed = (datetime.now() - start_time).seconds
+            progress = int(i / total * 100)
+            eta = int(elapsed / (progress / 100) - elapsed) if progress > 0 else 0
+
+            tasks[task_id].update({
+                "progress": progress,
+                "elapsed": elapsed,
+                "eta": eta,
+                "current": i,
+                "total": total
+            })
+
             time.sleep(1.0)
+
 
         os.makedirs("static", exist_ok=True)
         output_path = os.path.join("static", f"generated_{task_id}.xlsx")

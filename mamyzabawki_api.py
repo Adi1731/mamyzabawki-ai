@@ -224,7 +224,14 @@ def process_task(task_id, shop, user, password, model, file_path):
                 name = _norm(translations.get("name") or p.get("name"))
                 description = _norm(translations.get("description") or p.get("description"))
                 attributes = p.get("attributes") or []
-                producer_name = _norm(p.get("producer_id", ""))
+                producer = p.get("producer", {})
+                producer_translations = producer.get("translations", {}).get("pl_PL", {})
+                producer_name = _norm(
+                    producer_translations.get("name") or
+                    producer.get("name") or
+                    p.get("producer_id", "")
+                )
+
 
                 prompt = _build_prompt(name, description, attributes, producer_name)
                 html_code = _call_openai(prompt)
